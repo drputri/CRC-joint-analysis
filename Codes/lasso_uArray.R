@@ -4,86 +4,92 @@
 ## Prepared by: Dea Putri (dputri@its.jnj.com)     ##
 #####################################################
 
-setwd("/home/dputri/02. PhD/CRC microbiome/drp_crcmicrobiome/Joint analysis/")
-load("Data/rna_crcad.Rda")
+rna <- get(load("Data/rna_crcad.Rda"))
 load("Data/group_crcad.Rda")
-source("Codes/enet_functions.R")
+source("Codes/functions.R")
 
 
-# Using CMA
-compute.local <- function() {
-  out.all <- vector("list", 1000)
-  for(i in 1:1000) {
-    out.all[[i]] <- select_feat_CMA(X = rna.crcad, y = group, fold = 3, seed = i)
-  }
-  return(out.all)
-}
-
-
-
-## Create the cluster
-library(doSNOW)
+## Load libraries
 library(parallel)
-library(snow)
-library(foreach)
+library(ggplot2)
+library(glmnet)
 
-message("...Start to run glmnet...")
-t2 = Sys.time()
 
-cl <- makeCluster(4, type = "SOCK")
-clusterEvalQ(cl, library(data.table))
-clusterEvalQ(cl, library(CMA))
 
-registerDoSNOW(cl)
 
-feat <- compute.local()
+
+
+#----------------------------------------------------------------------------------------
+# FEATURES SELECTION
+#----------------------------------------------------------------------------------------
+# Create a cluster of cores
+cl <- makeCluster(getOption("cl.cores", 4))
+clusterExport(cl=cl, 
+              varlist=c("rna", "group", "select_feature"))
+
+
+# Main algorithm
+system.time({
+  out <- parLapply(cl=cl,
+                   X=1:1000,
+                   fun=function(i) {
+                     require(glmnet)
+                     
+                     # # sample 2/3 of the subjects at random
+                     # id_keep <- sample(x=rownames(rna),
+                     #                   size=floor(2*nrow(rna)/3),
+                     #                   replace=FALSE)
+                     
+                     # # subset data
+                     # x <- rna[rownames(rna) %in% id_keep, ]
+                     
+                     x <- rna
+                     
+                     # LASSO glmnet
+                     # feat_select <- select_feature(X=x, y=group[names(group) %in% id_keep], fold=5, seed=i)
+                     feat_select <- select_feature(X=x, y=group, fold=5, seed=i)
+                     
+                     return(feat_select)
+                   }
+  )
+})
+
+
+# Stop the cluster
 stopCluster(cl)
-
-registerDoSEQ()
-t <- Sys.time()
-print((t - t2))
-save(feat, file = "Data/feat_uArray_lasso.Rda")
+gc() # Running time: 125.270s
 
 
-
-
-
-
-
-#----------------------------------------------------------------------------------------
-# FEATURES SELECTED
-#----------------------------------------------------------------------------------------
-library(Biobase)
-
-
-## Graph: features selected
-load("Data/feat_uArray_lasso.Rda")
+# Gather the selected feature
 load("Data/esetRna_new.Rda") 
 
+feat_select <- do.call("c", out) %>%
+  table %>%
+  data.frame() %>%
+  set_colnames(c("Feat", "Freq")) 
+
 fdata <- as(featureData(esetRna), "data.frame")
-temp <- subset(fdata, select = c(SYMBOL))
+temp <- subset(fdata, select=c(SYMBOL))
 
-feat <- as.data.frame(unlist(feat))
-colnames(feat) <- "features"
+feat_select <- merge(feat_select, temp, by.x="Feat", by.y="row.names", all.x = TRUE) %>%
+  arrange(desc(Freq)) %>%
+  mutate(Ind=ifelse(Freq>=500, "1", "0"))
 
-d <- as.data.frame(table(feat$features))
-colnames(d) <- c("features", "freq")
-d <- merge(d, temp, by.x = "features", by.y = "row.names", all.x = TRUE)
-d$ind <- ifelse(d$freq >= 500, "1", "0")
+save(feat_select, file="Data/uArray_selected feat.Rda")
 
-save(d, file = "Data/selected feat.Rda")
 
-ggplot(data=d[d$freq > 50, ], aes(x = reorder(SYMBOL, -prop), y = prop)) +
-  geom_col(aes(fill = ind)) +
-  scale_fill_manual(name = "> 500",
-                    labels = c("No", "Yes"),
-                    values = c("1" = "tomato3", "0" = "grey54")) +
-  labs(x = "Features", y = "Frequency", title = "Number of repeats: 1,000") +
-  theme(panel.background = element_blank(),
-        panel.border = element_blank(),
-        legend.position = "none", 
-        axis.text.x = element_text(angle=90, hjust=1, size = 8))
-
+# Plot
+ggplot(data=feat_select[1:25, ], aes(x=reorder(SYMBOL, -Freq), y=Freq)) +
+  geom_col(aes(fill=Ind)) +
+  scale_fill_manual(name="> 500",
+                    labels=c("No", "Yes"),
+                    values=c("1" = "tomato3", "0" = "grey54")) +
+  labs(x="Features", y="Frequency", title="Number of repeats: 1,000") +
+  lims(y=c(0, 1000)) +
+  theme(panel.background=element_blank(),
+        panel.border=element_blank(),
+        legend.position="none", 
+        axis.text.x=element_text(angle=90, hjust=1, size = 8))
 
 
 
@@ -91,55 +97,45 @@ ggplot(data=d[d$freq > 50, ], aes(x = reorder(SYMBOL, -prop), y = prop)) +
 
 
 #----------------------------------------------------------------------------------------
-# FIXED GENES: 3-fold cross validation
+# FIXED GENES: 5-fold cross validation + performance assessment
 #----------------------------------------------------------------------------------------
-load("Data/selected feat.Rda")
-
-## Cluster
-library(doSNOW)
-library(parallel)
-library(snow)
-library(foreach)
-library(magrittr)
+load("Data/uArray_selected feat.Rda")
 
 
-# Input 
-k <- c(seq(2, nrow(d[d$ind == 1, ])))
+# Create a cluster of cores
+cl <- makeCluster(getOption("cl.cores", 4))
+clusterExport(cl=cl, 
+              varlist=c("rna", "group", "select_feature"))
 
 
-compute.local <- function() {
-  out.all <- vector("list", length(k))
-  for(i in seq_along(k)) {
-    out.all[[i]] <- enet_eval_CMA(k = k[i], X = rna.crcad, y = group, df.feat = d, feat.name = "features")
-    names(out.all)[[i]] <- paste0(k[i])
-  }
-  return(out.all)
-}
+# Main algorithm
+system.time({
+  out <- parLapply(cl=cl,
+                   X=1:1000,
+                   fun=function(i) {
+                     require(glmnet)
+                     
+                     # sample 2/3 of the subjects at random
+                     id_keep <- sample(x=rownames(rna),
+                                       size=floor(2*nrow(rna)/3),
+                                       replace=FALSE)
+                     
+                     # subset data
+                     x <- rna[rownames(rna) %in% id_keep, ]
+                     
+                     # LASSO glmnet
+                     feat_select <- select_feature(X=x, y=group[names(group) %in% id_keep], fold=5, seed=i)
+                     
+                     return(feat_select)
+                   }
+  )
+})
 
 
-
-## Create the cluster
-message("...Start to run glmnet...")
-t2 = Sys.time()
-
-cl <- makeCluster(4, type = "SOCK")
-clusterExport(cl, c("StratSampleSelection"), envir=globalenv())
-clusterEvalQ(cl, library(data.table))
-clusterEvalQ(cl, library(magrittr))
-clusterEvalQ(cl, library(CMA))
-clusterEvalQ(cl, library(mixOmics))
-clusterEvalQ(cl, library(caret))
-
-registerDoSNOW(cl)
-
-set.seed(1)
-out.list <- compute.local()
+# Stop the cluster
 stopCluster(cl)
+gc() # Running time: 125.270s
 
-registerDoSEQ()
-t <- Sys.time()
-print((t - t2))
-save(out.list, file = "Data/uArray_eval_lasso.Rda")      #2.426232 hours
 
 
 
