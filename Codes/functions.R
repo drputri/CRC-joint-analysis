@@ -102,8 +102,8 @@ summary.stat.cma <- function(class.lasso) {
 
 
 ## Function for model evaluation
-perf_eval <- function(k, X, y, df.feat, fold=3, group.name,
-                      iti=1000, df.feat.all=TRUE, feat.name, alpha=1) {
+perf_eval <- function(k, X, y, df.feat, fold=3, group.name, alpha=1) {
+  
   require(glmnet)
   require(limma)
   require(magrittr)
@@ -114,80 +114,72 @@ perf_eval <- function(k, X, y, df.feat, fold=3, group.name,
     X <- as.matrix.data.frame(X)
   }
   
+  # Top feature
+  df.feat <- as.data.frame(df.feat)
+  
+  df.feat <- df.feat[order(-df.feat$Freq),] 
+  feat.to.select <- droplevels(df.feat$Feat[1:k])
+  
   # sample 2/3 of the subjects at random
   id_keep <- sample(x=rownames(X),
                     size=floor(2*nrow(X)/3),
                     replace=FALSE)
   
-  # uArray matrix
-  df.train <- X[rownames(X) %in% id_keep, ]
-  df.test <- X[!(rownames(X) %in% id_keep), ]
+  out <- vector("list", k-1)
   
-  # Response / group
-  y.train <- y[names(y) %in% id_keep]
-  y.test <- y[!(names(y) %in% id_keep)]
-  
-  # Top feature
-  df.feat <- as.data.frame(df.feat)
-  
-  if(df.feat.all) {
-    df.feat <- df.feat[df.feat$Ind==1, ]
-  }
-  
-  df.feat <- df.feat[order(-df.feat$Freq),] 
-  
-  out <- list()
-  
-  feat.to.select <- df.feat$Feat
-  
-  out <- vector("list", iti)
+  i=1
   
   for(f in 2:length(feat.to.select)) {
     
     f.red <- droplevels(feat.to.select[1:f])
-    x.train <- as.matrix.data.frame(df.train[, colnames(df.train) %in% f.red])
-    x.test <- as.matrix.data.frame(df.test[, colnames(df.test) %in% f.red])
     
-    for (i in 1:iti) {
+    # uArray matrix
+    df.train <- X[rownames(X) %in% id_keep, colnames(X) %in% f.red]
+    df.test <- X[!(rownames(X) %in% id_keep), colnames(X) %in% f.red]
       
-      set.seed(i)
+    # Response / group
+    y.train <- y[names(y) %in% id_keep]
+    y.test <- y[!(names(y) %in% id_keep)]
       
-      m0 <- cv.glmnet(type.measure="class", x=x.train, y=y.train,
-                      alpha=alpha, family='binomial', nfolds=fold, parallel=TRUE)
-      pred <- as.data.frame(predict(m0, newx=x.test, s="lambda.min", type = "response",
-                                        alpha = alpha))
-        
-    }
+      
+    # Ridge regression
+    m0 <- cv.glmnet(type.measure="class", x=df.train, y=y.train,
+                    alpha=alpha, family=binomial, nfolds=fold)
+    m1 <- glmnet(x=as.matrix(df.train),
+                 y=y.train,
+                 family="binomial",
+                 alpha=alpha,
+                 lambda=m0$lambda.min)
+    pred <- predict(m1, newx=as.matrix(df.test), type="class") %>%
+      data.frame() %>%
+      rename(pred=s0) %>%
+      mutate(pred=factor(pred, levels=c("Adenoma", "CRC")))
+      
+    # Calculate the confusion matrix
+      conf <- caret::confusionMatrix(pred$pred, as.factor(y.test))
+      
+      df.eval <- data.frame(BER = get.BER(t(conf$table)),
+                            mce = 1-conf$overall[["Accuracy"]],
+                            kappa = conf$overall[["Kappa"]],
+                            specificity = conf$byClass[["Specificity"]],
+                            sensitivity = conf$byClass[["Sensitivity"]],
+                            ppv = conf$byClass[["Pos Pred Value"]],
+                            npv = conf$byClass[["Neg Pred Value"]])
+    
+    # Store the information about the test set
+      subjectPred.temp <- data.frame(sampleID=rownames(pred),
+                                     pred, 
+                                     obs=y.test
+                                     )
+      
+      out[[i]] <- list(df.eval, subjectPred.temp)
+      names(out[[i]]) <- c("evaluation", "subject prediction")
+      names(out)[[i]] <- f
+      
+      i <- i+1
     
   }
   
-  
-  
-  for(i.k in 1:iti) {
-    set.seed(i.k)
-    cv.enet <- cv.glmnet(type.measure = "class", x = df.train2, y = y.train,
-                         alpha = alpha, family='binomial', nfolds = fold, parallel = TRUE)
-    pred_enet = as.data.frame(predict(cv.enet, newx = df.test2, s = "lambda.1se", type = "response",
-                        alpha = alpha))
-    colnames(pred_enet) <- "pred"
-    pred_enet$pred <- as.factor(ifelse(pred_enet$pred > 0.5, "CRC", "Adenoma"))
-    conf <- caret::confusionMatrix(pred_enet$pred, as.factor(y.test))
-    
-    df.eval <- data.frame(BER = get.BER(t(conf$table)),
-                          mce = 1-conf$overall[["Accuracy"]],
-                          kappa = conf$overall[["Kappa"]],
-                          specificity = conf$byClass[["Specificity"]],
-                          sensitivity = conf$byClass[["Sensitivity"]],
-                          ppv = conf$byClass[["Pos Pred Value"]],
-                          npv = conf$byClass[["Neg Pred Value"]])
-    subjectPred.temp <- data.frame(pred_enet, 
-                                   obs = y.test,
-                                   sampleID = rownames(pred_enet))
-    
-    out[[i.k]] <- list(df.eval, subjectPred.temp)
-    names(out[[i.k]]) <- c("evaluation", "subject prediction")
-    names(out)[[i.k]] <- i.k
-  }
   return(out)
 }
 

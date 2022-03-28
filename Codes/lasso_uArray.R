@@ -35,19 +35,19 @@ system.time({
                    fun=function(i) {
                      require(glmnet)
                      
-                     # # sample 2/3 of the subjects at random
-                     # id_keep <- sample(x=rownames(rna),
-                     #                   size=floor(2*nrow(rna)/3),
-                     #                   replace=FALSE)
+                     # sample 2/3 of the subjects at random
+                     id_keep <- sample(x=rownames(rna),
+                                       size=floor(2*nrow(rna)/3),
+                                       replace=FALSE)
                      
-                     # # subset data
-                     # x <- rna[rownames(rna) %in% id_keep, ]
+                     # subset data
+                     x <- rna[rownames(rna) %in% id_keep, ]
                      
-                     x <- rna
+                     # x <- rna #--old version
                      
                      # LASSO glmnet
-                     # feat_select <- select_feature(X=x, y=group[names(group) %in% id_keep], fold=5, seed=i)
-                     feat_select <- select_feature(X=x, y=group, fold=5, seed=i)
+                     feat_select <- select_feature(X=x, y=group[names(group) %in% id_keep], fold=5, seed=i)
+                     # feat_select <- select_feature(X=x, y=group, fold=5, seed=i) #--old version
                      
                      return(feat_select)
                    }
@@ -105,7 +105,8 @@ load("Data/uArray_selected feat.Rda")
 # Create a cluster of cores
 cl <- makeCluster(getOption("cl.cores", 4))
 clusterExport(cl=cl, 
-              varlist=c("rna", "group", "select_feature"))
+              varlist=c("rna", "group", 
+                        "feat_select", "perf_eval"))
 
 
 # Main algorithm
@@ -114,19 +115,20 @@ system.time({
                    X=1:1000,
                    fun=function(i) {
                      require(glmnet)
+                     require(limma)
+                     require(magrittr)
+                     require(mixOmics)
+                     require(caret)
+                     require(dplyr)
+                     require(magrittr)
                      
-                     # sample 2/3 of the subjects at random
-                     id_keep <- sample(x=rownames(rna),
-                                       size=floor(2*nrow(rna)/3),
-                                       replace=FALSE)
                      
-                     # subset data
-                     x <- rna[rownames(rna) %in% id_keep, ]
+                     # Performance measure
+                     set.seed(i)
+                     model.perf <- perf_eval(k=8, X=rna, y=group, df.feat=feat_select, 
+                                             fold=5, alpha=0)
                      
-                     # LASSO glmnet
-                     feat_select <- select_feature(X=x, y=group[names(group) %in% id_keep], fold=5, seed=i)
-                     
-                     return(feat_select)
+                     return(model.perf)
                    }
   )
 })
@@ -136,54 +138,38 @@ system.time({
 stopCluster(cl)
 gc() # Running time: 125.270s
 
+save(out, file="Data/uArray_model performance.Rda")
 
 
-
-
-
-
-
-#----------------------------------------------------------------------------------------
-# PERFORMANCE ASSESSMENT
-#----------------------------------------------------------------------------------------
 ## Calculate the data summary
-load("Data/uArray_eval_lasso.Rda")
+library(tibble)
+library(tidyr)
+load("Data/uArray_model performance.Rda")
 
-eval <- NULL
-for(i in 1:length(out.list)) {
-  temp <- as.data.frame(out.list[[i]])
-  temp$k <- names(out.list)[i]
-  eval <- rbind(eval, temp)
-}
+tmp <- lapply(out, function(a) { #out[[1]]
+  x <- lapply(a, function(b) { #out[[1]]$k
+    as.data.frame(b$evaluation)
+  })
+  
+  y <- do.call("rbind", x) %>%
+    rownames_to_column(var="k")
+})
 
-data_summary <- function(data, varname, groupnames){
-  require(plyr)
-  summary_func <- function(x, col){
-    c(mean = mean(x[[col]], na.rm=TRUE),
-      sd = sd(x[[col]], na.rm=TRUE))
-  }
-  data_sum<-ddply(data, groupnames, .fun=summary_func,
-                  varname)
-  data_sum <- rename(data_sum, c("mean" = varname))
-  return(data_sum)
-}
-
-eval$k <- as.factor(eval$k)
-sorted_labels <- paste(sort(as.integer(levels(eval$k))))
-eval$k <- factor(eval$k, levels = sorted_labels)
-
-library(reshape2)
-eval_long <- melt(eval, id.vars = c("k"))
-eval_long <- data_summary(eval_long, varname = "value", 
-                          groupnames = c("k", "variable"))
-
+eval <- do.call("rbind", tmp) %>%
+  rownames_to_column(var="i") %>%
+  pivot_longer(!c(k, i), names_to="stat", values_to="value") %>%
+  group_by(k, stat) %>%
+  summarise(avg=mean(value),
+            std=sd(value))
+  
+# Plot
 pd <- position_dodge(0.1)
-ggplot(eval_long[eval_long$variable == "BER",], aes(x=k, y=value)) + 
-  geom_errorbar(aes(ymin=value-sd, ymax=value+sd), width=.1, position=pd) +
+ggplot(eval[eval$stat=="BER", ], aes(x=k, y=avg)) + 
+  geom_errorbar(aes(ymin=avg-std, ymax=avg+std), width=.1, position=pd) +
   #geom_jitter(data = eval[, c("BER", "k")], aes(x = k, y = BER), color = "lightblue", alpha = 0.5, width = 0.1)
-  geom_line(position = pd) +
-  geom_point(position = pd) +
-  ylim(0, .2) +
+  geom_line(position=pd) +
+  geom_point(position=pd) +
+  # ylim(0, .2) +
   labs(y = "BER") +
   theme(panel.background = element_blank(),
         panel.border = element_blank()#,
