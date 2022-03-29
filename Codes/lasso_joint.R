@@ -225,9 +225,10 @@ coef <- merge(coef, temp, by.x="Feat", by.y="row.names", all.x=TRUE) %>%
 # uBiome
 load("Data/uBiome_taxtable.Rda")
 
-test <- coef
-coef$name[grepl("SVs", coef$Feat)] <- as.character(taxTable$Genus[rownames(taxTable) %in% coef$Feat[grepl("SVs", coef$Feat)]])
-coef$prop <- coef$Freq/500
+coef <- merge(coef, taxTable, by.x="Feat", by.y="row.names", all.x=TRUE) %>%
+  mutate(name=ifelse(is.na(name), as.character(Genus), name)) %>%
+  select(-Genus) %>%
+  mutate(prop=Freq/500)
 
 save(coef, file = "Data/joint_lasso_uArray_coef.Rda")
 
