@@ -4,45 +4,47 @@
 ## Prepared by: Dea Putri (dputri@its.jnj.com)     ##
 #####################################################
 
-setwd("/mnt/exports/shared/home/dputri/PhD/CRC microbiome/drp_crcmicrobiome/Joint analysis")
+## Load data
 load("Data/rna_crcad.Rda")
-load("Data/group_crcad.Rda")
 load("Data/otu_431_clr.Rda")
+load("Data/group_crcad.Rda")
 
-feat <- get(load("Data/selected feat.Rda"))
-genus <- get(load("Data/selected genus.Rda"))
+# Get the selected features
+feat <- get(load("Data/uArray_selected feat.Rda"))
+genus <- get(load("Data/uBiome_selected feat.Rda"))
 
-feat <- feat[order(-feat$freq), ]
-genus <- genus[order(-genus$freq), ]
+# Order the selected features based on the frequency of selection
+feat <- feat[order(-feat$Freq), ]
+genus <- genus[order(-genus$Freq), ]
 
 
-# Get top 10 uArray & 4 microbiome features
-get.feat <- feat$features[1:14]
-get.genus <- genus$genus[1:4]
+# Get top 6 uArray & 8 microbiome features
+get.feat <- droplevels(feat$Feat[1:6])
+get.genus <- droplevels(genus$Feat[1:8])
 
 
 
 ## Subset uArray and uBiome data
-rna.14 <- rna.crcad[, colnames(rna.crcad) %in% as.character(get.feat)]
-rna.14 <- cbind(rna.14, group)
-otu.clr.4 <- otu.clr[, colnames(otu.clr) %in% as.character(get.genus)]
-otu.clr.4 <- cbind(otu.clr.4, group)
+rna.6 <- rna.crcad[, colnames(rna.crcad) %in% as.character(get.feat)]
+rna.6 <- cbind(rna.6, group)
+otu.8 <- otu.clr[, colnames(otu.clr) %in% as.character(get.genus)]
+otu.8 <- cbind(otu.8, group)
 
-save(rna.14, file = "Data/df_lasso_14uarray.Rda")
-save(otu.clr.4, file = "Data/df_lasso_4uBiome.Rda")
+save(rna.6, file = "Data/df_lasso_6uarray.Rda")
+save(otu.8, file = "Data/df_lasso_8uBiome.Rda")
 
 
 
-## Lasso data frame for non-penalized uArray (445 features)
-df.uArray <- merge(rna.14, otu.clr, by = "row.names")
+## Lasso data frame for non-penalized uArray (439 features)
+df.uArray <- merge(rna.6, otu.clr, by = "row.names")
 rownames(df.uArray) <- df.uArray$Row.names
 df.uArray <- subset(df.uArray, select = -c(Row.names))
 save(df.uArray, file = "Data/df_lasso_uArray.Rda")
 
 
 
-## Lasso data frame for non-penalized uBiome (9,699 features)
-df.uBiome <- merge(rna.crcad, otu.clr.4, by = "row.names")
+## Lasso data frame for non-penalized uBiome (9,705 features)
+df.uBiome <- merge(rna.crcad, otu.8, by = "row.names")
 rownames(df.uBiome) <- df.uBiome$Row.names
 df.uBiome <- subset(df.uBiome, select = -c(Row.names))
 save(df.uBiome, file = "Data/df_lasso_uBiome.Rda")
@@ -63,169 +65,172 @@ save(df.all, file = "Data/df_lasso_all.Rda")
 
 
 #----------------------------------------------------------------------------------------
-# PULLING 13 MICROARRAY + 431 MICROBIOME: no penalisation on microarray 
+# PULLING 6 MICROARRAY + 431 MICROBIOME: no penalisation on microarray 
 #----------------------------------------------------------------------------------------
 load("Data/df_lasso_uArray.Rda")
 
-fit.lasso <- function(df.comb, fold = 3, iter = 1000, standardized = TRUE) {
-  require(glmnet)
-  require(limma)
-  require(magrittr)
-  require(mixOmics)
-  require(caret)
-  
-  out <- vector("list", iter)
-  
-  for(i.k in 1:iter) {
-    set.seed(i.k)
-    
-    smpl <- createDataPartition(y = df.comb$group, p=0.7, list = FALSE)
-    
-    df.train <- df.comb[smpl, ]
-    df.test <- df.comb[-smpl, ]
-    
-    x <- model.matrix(group~., df.train)[,-1]
-    y <- as.factor(factor(df.train$group, levels = c("Adenoma", "CRC")))
-    
-    
-    #Unpenalized microarray data
-    penalty.fctr <- ifelse(grepl("SVs", colnames(x), ignore.case = TRUE), 1, 0)
-    
-    cv.lasso <- NULL
-    while(is(cv.lasso, 'try-error') || is.null(cv.lasso)) {
-      cv.lasso <- try(cv.glmnet(x, y, alpha = 1, family = "binomial", type.measure = "class",
-                                penalty.factor = penalty.fctr, standardize = standardized,
-                                nfolds = fold, parallel = TRUE), silent = FALSE)
-    }
-    
-    mod.combined <- glmnet(x, y, alpha = 1, family = "binomial",
-                           penalty.factor = penalty.fctr, standardize = standardized,
-                           lambda = cv.lasso$lambda.min)
-    
-    x.test <- model.matrix(group ~., df.test)[,-1]
-    pred.out = as.data.frame(predict(mod.combined, newx = x.test, s = "lambda.min", type = "class",
-                                     alpha = 1))
-    colnames(pred.out) <- "pred"
-    conf <- caret::confusionMatrix(pred.out$pred, as.factor(df.test$group))
-    
-    df.eval <- data.frame(BER = get.BER(t(conf$table)),
-                          mce = 1-conf$overall[["Accuracy"]],
-                          kappa = conf$overall[["Kappa"]],
-                          specificity = conf$byClass[["Specificity"]],
-                          sensitivity = conf$byClass[["Sensitivity"]],
-                          ppv = conf$byClass[["Pos Pred Value"]],
-                          npv = conf$byClass[["Neg Pred Value"]])
-    
-    subjectPred.temp <- data.frame(pred.out, 
-                                   obs = df.test$group,
-                                   sampleID = rownames(pred.out))
-    
-    coeff <- as.data.frame.matrix(coef(mod.combined))
-    coeff$feat <- rownames(coeff)
-    coeff <- coeff[coeff$s0 != 0, ]
-    
-    out[[i.k]] <- list(df.eval, subjectPred.temp, coeff)
-    names(out[[i.k]]) <- c("evaluation", "subject prediction", "coefficients")
-    names(out)[[i.k]] <- i.k
-  }
-  return(out)
-}
+library(parallel)
+library(ggplot2)
 
 
-# Not-standardized
-set.seed(1)
-t2 = Sys.time()
-joint.lasso.1 <- fit.lasso(df.comb = df.uArray, iter = 500, standardized = FALSE)
-t <- Sys.time()
-print((t - t2))
-save(joint.lasso.1, file = "Data/joint_lasso_1.Rda")      # time = 1.07 mins
+# Create a cluster of cores
+cl <- makeCluster(getOption("cl.cores", 4))
+clusterExport(cl=cl, 
+              varlist=c("df.uArray"))
+
+
+# Main algorithm
+system.time({
+  out <- parLapply(cl=cl,
+                   X=1:500,
+                   fun=function(i) {
+                     require(glmnet)
+                     require(magrittr)
+                     require(mixOmics)
+                     require(dplyr)
+                     
+                     set.seed(i)
+                     
+                     # sample 2/3 of the subjects at random
+                     id_keep <- sample(x=rownames(df.uArray),
+                                       size=floor(2*nrow(df.uArray)/3),
+                                       replace=FALSE)
+                     
+                     # Sample test and train data
+                     df.train <- df.uArray[rownames(df.uArray) %in% id_keep, ]
+                     df.test <- df.uArray[!(rownames(df.uArray) %in% id_keep), ]
+                     
+                     x <- model.matrix(group~., df.train)[,-1]
+                     y <- as.factor(factor(df.train$group, levels = c("Adenoma", "CRC")))
+                     
+                     
+                     #Unpenalized microarray data
+                     penalty.fctr <- ifelse(grepl("SVs", colnames(x), ignore.case = TRUE), 1, 0)
+                     
+                     
+                     # LASSO
+                     cv.lasso <- NULL
+                     while(is(cv.lasso, 'try-error') || is.null(cv.lasso)) {
+                       cv.lasso <- try(cv.glmnet(x, y, alpha=1, family="binomial", type.measure="class",
+                                                 penalty.factor=penalty.fctr, standardize=TRUE,
+                                                 nfolds=5, parallel=TRUE), silent=FALSE)
+                     }
+                     
+                     m1 <- glmnet(x, y, alpha=1, family="binomial",
+                                  penalty.factor=penalty.fctr, standardize=TRUE,
+                                  lambda=cv.lasso$lambda.min)
+                     
+                     x.test <- model.matrix(group ~., df.test)[,-1]
+                     pred.out <- as.data.frame(predict(m1, newx=x.test, s="lambda.min", 
+                                                       type="class", alpha=1)) %>%
+                       rename(pred="s1") %>%
+                       mutate(pred=factor(pred, levels=c("Adenoma", "CRC")))
+                     
+                     # Model performance
+                     conf <- caret::confusionMatrix(pred.out$pred, as.factor(df.test$group))
+                     
+                     df.eval <- data.frame(BER = get.BER(t(conf$table)),
+                                           mce = 1-conf$overall[["Accuracy"]],
+                                           kappa = conf$overall[["Kappa"]],
+                                           specificity = conf$byClass[["Specificity"]],
+                                           sensitivity = conf$byClass[["Sensitivity"]],
+                                           ppv = conf$byClass[["Pos Pred Value"]],
+                                           npv = conf$byClass[["Neg Pred Value"]])
+                     
+                     # Test subject 
+                     subjectPred.temp <- data.frame(pred.out, 
+                                                    obs = df.test$group,
+                                                    sampleID = rownames(pred.out))
+                     
+                     coeff <- as.data.frame.matrix(coef(m1))
+                     coeff$feat <- rownames(coeff)
+                     coeff <- coeff[coeff$s0 != 0, ]
+                     
+                     out <- list(df.eval, subjectPred.temp, coeff)
+                     names(out) <- c("evaluation", "subject prediction", "coefficients")
+                     
+                     
+                     return(out)
+                   }
+  )
+})
+
+
+# Stop the cluster
+stopCluster(cl)
+gc() # Running time: 16.360s
+
+save(out, file = "Data/joint_lasso_uArray.Rda")
 
 
 
+## Calculate the data summary
+load("Data/joint_lasso_uArray.Rda")
+library(tibble)
+library(tidyr)
+library(magrittr)
+library(dplyr)
+
+tmp <- lapply(out, function(a) { #out[[1]]
+  as.data.frame(a$evaluation)
+})
+
+perf <- do.call("rbind", tmp) %>%
+  rownames_to_column(var="i")
+
+save(perf, file="Data/joint_lasso_uArray_perf.Rda")
 
 
-#### PERFORMANCE ASSESSMENT
-## Calculate the evaluation statistics
-load("Data/joint_lasso_1.Rda")
-
-
-# Evaluation
-eval.joint.1 <- NULL
-for(i in 1:length(joint.lasso.1)) {
-  temp <- joint.lasso.1[[i]]$evaluation
-  temp$iter <- names(joint.lasso.1)[i]
-  eval.joint.1 <- rbind(eval.joint.1, temp)
-}
-
-ggplot(eval.joint.1, aes(x = BER)) +
-  geom_density() +
-  geom_vline(aes(xintercept = mean(eval.joint.1$BER)), color="red", linetype="dashed", size=1) +
-  annotate("text", x = mean(eval.joint.1$BER)+0.02, y = c(15), label = paste0("Mean: ", round(mean(eval.joint.1$BER), 2)), 
-           size = 4.5, color = c("red"))+
-  labs(x = "BER",
-       y = "Count") +
-  theme(panel.background = element_blank(),
-        panel.border = element_blank(),
-        #legend.position = "none", 
-        axis.title.y = element_text(size = 16),
-        axis.text.y = element_text(size = 14),
-        axis.title.x = element_text(size = 16),
-        axis.text.x = element_text(size = 14))
-
-
+# Density plot
+ggplot(tmp, aes(x=BER)) +
+  geom_density(adjust=2)
 
 
 
 ## Lasso coefficients
-coef.lasso <- NULL
-for(i in 1:length(joint.lasso.1)) {
-  temp <- joint.lasso.1[[i]]$coefficients
-  temp$iter <- names(joint.lasso.1)[i]
-  coef.lasso <- rbind(coef.lasso, temp)
-}
+tmp <- lapply(out, function(a) { #out[[1]]
+  as.data.frame(a$coefficients)
+})
+
+coef <- do.call("rbind", tmp) 
 
 
 # Remove those that is always 0
-coef.lasso <- coef.lasso[abs(coef.lasso$s0) > 0, ]
-coef.lasso <- coef.lasso[coef.lasso$feat != "(Intercept)", ]
+coef <- coef[abs(coef$s0) > 0, ]
+coef <- coef[coef$feat != "(Intercept)", ]
+rownames(coef) <- NULL
+
+coef <- coef %>%
+  select(-s0) %>%
+  table %>%
+  data.frame() %>%
+  set_colnames(c("Feat", "Freq")) 
 
 
 
-## Get the feature and genus name
+## Get the genes and genus name
 # uArray
 load("Data/esetRna_new.Rda") 
 
 fdata <- as(featureData(esetRna), "data.frame")
 temp <- subset(fdata, select = c(SYMBOL))
 
-uBiome <- colnames(df.uArray)[grepl("SVs", colnames(df.uArray), ignore.case = TRUE)]
+coef$Feat <- gsub("|`", "", coef$Feat)
+coef <- merge(coef, temp, by.x="Feat", by.y="row.names", all.x=TRUE) %>%
+  rename(name="SYMBOL")
 
-temp.uarray <- coef.lasso[!coef.lasso$feat %in% uBiome, ]
-temp.uarray$feat <- gsub("|`", "", temp.uarray$feat)
-temp.uarray <- merge(temp.uarray, temp, by.x = "feat", by.y = "row.names", all.x = TRUE)
-names(temp.uarray)[names(temp.uarray) == "SYMBOL"] <- "name"
 
-save(temp.uarray, file = "Data/uarraySelect_lasso_1.Rda")
 
 
 # uBiome
-load("Data/Obj_Genus.rda")
+load("Data/uBiome_taxtable.Rda")
 
-taxtable <- as.data.frame(tax_table(Obj_Genus))
-temp <- subset(taxtable, select = c(Genus))
-taxTable <- temp
-save(taxTable, file = "Data/uBiome_taxtable.Rda")
+test <- coef
+coef$name[grepl("SVs", coef$Feat)] <- as.character(taxTable$Genus[rownames(taxTable) %in% coef$Feat[grepl("SVs", coef$Feat)]])
+coef$prop <- coef$Freq/500
 
-temp.ubiome <- coef.lasso[coef.lasso$feat %in% uBiome, ]
-temp.ubiome <- merge(temp.ubiome, temp, by.x = "feat", by.y = "row.names", all.x = TRUE)
-temp.ubiome$Genus <- as.factor(factor(temp.ubiome$Genus))
-names(temp.ubiome)[names(temp.ubiome) == "Genus"] <- "name"
+save(coef, file = "Data/joint_lasso_uArray_coef.Rda")
 
-save(temp.ubiome, file = "Data/ubiomeSelect_lasso_1.Rda")
-
-coef.lasso <- rbind(temp.uarray, temp.ubiome)
-coef.lasso$name <- as.factor(as.character(coef.lasso$name))
-order.x <- factor(unique(coef.lasso$name), levels = unique(coef.lasso$name))
 
 give.n <- function(x, upper_limit = max(coef.lasso$s0, na.rm = TRUE)*1.15){
   return(data.frame(y = as.numeric(.95*upper_limit),
@@ -236,17 +241,16 @@ give.n <- function(x, upper_limit = max(coef.lasso$s0, na.rm = TRUE)*1.15){
 
 
 ## Microbiome frequency of selection
-d <- as.data.frame(table(temp.ubiome$name))
-colnames(d) <- c("features", "freq")
-d <- d[order(-d$freq), ]
+d <- coef[grepl("SVs", coef$Feat), ]
+d <- d[order(-d$Freq), ]
 d$features <- as.factor(factor(d$features, levels = unique(d$features[order(-d$freq)]), ordered = TRUE))
 d.20 <- d[1:20, ]
-d.20$ind <- ifelse(d.20$freq >= 250, "1", "0")
+d.20$ind <- ifelse(d.20$Freq >= 250, "1", "0")
 
 
-ggplot(data=d.20, aes(x = features, y = freq)) +
-  geom_col(aes(fill = ind)) +
-  labs(x = "", y = "Selection frequency") +
+ggplot(data=d.20, aes(x=reorder(name, -Freq), y=Freq)) +
+  geom_col(aes(fill=ind)) +
+  labs(x="", y="Selection frequency") +
   scale_fill_manual(name = "> 500",
                     labels = c("No", "Yes"),
                     values = c("1" = "tomato3", "0" = "grey54")) +
@@ -255,74 +259,6 @@ ggplot(data=d.20, aes(x = features, y = freq)) +
         legend.position = "none", 
         axis.title.y = element_text(size = 12),
         axis.text.x = element_text(angle=90, hjust=1, size = 12))
-
-
-# Microbiome features
-temp.ubiome$name <- as.factor(factor(temp.ubiome$name, levels = levels(d$features)))
-coef.ubiome <- temp.ubiome[temp.ubiome$name %in% d.20$features, ]
-
-give.n <- function(x, upper_limit = max(coef.ubiome$s0, na.rm = TRUE)*1.15){
-  return(data.frame(y = as.numeric(.95*upper_limit),
-                    label = paste('n=', 
-                                  format(length(x), big.mark = ",", decimal.mark = ".", scientific = FALSE))))
-}
-
-ggplot(coef.ubiome, aes(x=name, y=s0)) + 
-  geom_boxplot() + 
-  #geom_jitter(shape = 16, position = position_jitter(0.2)) +
-  stat_summary(fun.data = give.n, geom = "text", col="red", hjust = .5, vjust = .9, size = 3) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
-  ylab("Lasso coefficients") +
-  xlab("Features") +
-  #scale_x_discrete(limits = order.x) +
-  theme(panel.background = element_blank(),
-        panel.border = element_blank(),
-        axis.text.x = element_text(angle=90, hjust=1, size = 12),
-        axis.title.x = element_text(size = 14),
-        axis.text.y = element_text(size = 12),
-        axis.title.y = element_text(size = 14))
-
-
-
-## Top 5 uArray genes profiles on CRC and adenoma patients
-d <- as.data.frame(table(coef.lasso$name))
-d <- d[order(-d$Freq), ]
-
-
-# Top 5 uArray genes
-get.genes <- as.character(d$Var1[1:5])
-
-load("Data/esetRna_new.Rda") 
-
-fdata <- as(featureData(esetRna), "data.frame")
-temp <- as.data.frame(subset(fdata, select = c(SYMBOL)))
-temp$genes <- rownames(temp)
-temp <- as.data.frame(temp[temp$SYMBOL %in% get.genes, ])
-
-load("Data/rna_crcad.Rda")
-load("Data/group_crcad.Rda")
-
-group <- as.data.frame(group)
-group$sampleID <- rownames(group)
-rna <- rna.crcad[, colnames(rna.crcad) %in% temp$genes]
-rna$sampleID <- rownames(rna)
-
-rna.long <- melt(rna, 
-                 id.vars = c("sampleID"),
-                 variable.name = "genes",
-                 value.name = "exprs")
-rna.long <- merge(rna.long, group, by = "sampleID", all.x = TRUE)
-rna.long <- merge(rna.long, temp, by = "genes", all.x = TRUE)
-
-
-# Plot
-ggplot(rna.long, aes(x = group, y = exprs)) +
-  geom_boxplot() +
-  facet_wrap(~ SYMBOL) +
-  ylab("Expression") +
-  xlab("Group") +
-  theme(panel.background = element_blank(),
-        panel.border = element_blank())
 
 
 
