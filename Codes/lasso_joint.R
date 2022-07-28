@@ -4,14 +4,25 @@
 ## Prepared by: Dea Putri (dputri@its.jnj.com)     ##
 #####################################################
 
+
+
 ## Load data
 load("Data/rna_crcad.Rda")
 load("Data/otu_431_clr.Rda")
 load("Data/group_crcad.Rda")
 
-# Get the selected features
-feat <- get(load("Data/uArray_selected feat.Rda"))
-genus <- get(load("Data/uBiome_selected feat.Rda"))
+
+# Get the selected features of the different MCCV type
+feat0 <- get(load("Data/uArray_selected feat_MCCVType0.Rda"))
+feat1 <- get(load("Data/uArray_selected feat_MCCVType1.Rda"))
+feat2 <- get(load("Data/uArray_selected feat_MCCVType2.Rda"))
+feat3 <- get(load("Data/uArray_selected feat_MCCVType3.Rda"))
+
+genus0 <- get(load("Data/uBiome_selected feat_MCCVType0.Rda"))
+genus1 <- get(load("Data/uBiome_selected feat_MCCVType1.Rda"))
+genus2 <- get(load("Data/uBiome_selected feat_MCCVType2.Rda"))
+genus3 <- get(load("Data/uBiome_selected feat_MCCVType3.Rda"))
+
 
 # Order the selected features based on the frequency of selection
 feat <- feat[order(-feat$Freq), ]
@@ -218,8 +229,6 @@ temp <- subset(fdata, select = c(SYMBOL))
 coef$Feat <- gsub("|`", "", coef$Feat)
 coef <- merge(coef, temp, by.x="Feat", by.y="row.names", all.x=TRUE) %>%
   rename(name="SYMBOL")
-
-
 
 
 # uBiome

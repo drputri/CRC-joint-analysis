@@ -102,7 +102,9 @@ summary.stat.cma <- function(class.lasso) {
 
 
 ## Function for model evaluation
-perf_eval <- function(k, X, y, df.feat, fold=3, group.name, alpha=1) {
+perf_eval <- function(k, X, y, rank.by, order.desc = TRUE, 
+                      df.feat, fold = 3, group.name, alpha = 1,
+                      MCCV.type = 0) {
   
   require(glmnet)
   require(limma)
@@ -110,20 +112,58 @@ perf_eval <- function(k, X, y, df.feat, fold=3, group.name, alpha=1) {
   require(mixOmics)
   require(caret)
   
-  if(class(X) != "matrix"){
-    X <- as.matrix.data.frame(X)
-  }
+  # Combine the RNA and group
+  dt <- merge(y, X, by="row.names")
+  rownames(dt) <- dt$Row.names 
+  dt <- subset(dt, select=-c(Row.names))
   
   # Top feature
   df.feat <- as.data.frame(df.feat)
   
-  df.feat <- df.feat[order(-df.feat$Freq),] 
+  if(order.desc) {
+    df.feat <- df.feat[order(-df.feat[[rank.by]]),] 
+  } else {
+    df.feat <- df.feat[order(df.feat[[rank.by]]),] 
+  }
+  
   feat.to.select <- droplevels(df.feat$Feat[1:k])
   
-  # sample 2/3 of the subjects at random
-  id_keep <- sample(x=rownames(X),
-                    size=floor(2*nrow(X)/3),
-                    replace=FALSE)
+  
+  # Samples on the different MCCV type
+  if(MCCV.type==0) {
+    
+    # sample 2/3 of the subjects at random
+    id_keep <- sample(x=rownames(X),
+                      size=floor(2*nrow(X)/3),
+                      replace=FALSE)
+    
+  } else if(MCCV.type==1) {
+    
+    # MCCV type 1: 11-11 samples on test set
+    ad <- names(group)[group=="Adenoma"]
+    crc <- names(group)[group=="CRC"]
+    id_keep <- c(sample(x=ad, size=30, replace=FALSE),
+                 sample(x=crc, size=10, replace=FALSE))
+    
+  } else if (MCCV.type==2) {
+    
+    # MCCV type 2: 20-10 samples on test set
+    ad <- names(group)[group=="Adenoma"]
+    crc <- names(group)[group=="CRC"]
+    id_keep <- c(sample(x=ad, size=21, replace=FALSE),
+                 sample(x=crc, size=11, replace=FALSE))
+    
+  } else {
+    
+    # MCCV type 2: 15-6 samples on test set
+    ad <- names(group)[group=="Adenoma"]
+    crc <- names(group)[group=="CRC"]
+    id_keep <- c(sample(x=ad, size=26, replace=FALSE),
+                 sample(x=crc, size=15, replace=FALSE))
+    
+  }
+  
+  
   
   out <- vector("list", k-1)
   
@@ -134,31 +174,38 @@ perf_eval <- function(k, X, y, df.feat, fold=3, group.name, alpha=1) {
     f.red <- droplevels(feat.to.select[1:f])
     
     # uArray matrix
-    df.train <- X[rownames(X) %in% id_keep, colnames(X) %in% f.red]
-    df.test <- X[!(rownames(X) %in% id_keep), colnames(X) %in% f.red]
+    df.train <- dt[rownames(dt) %in% id_keep, colnames(dt) %in% c("x", as.character(f.red))]
+    df.test <- dt[!rownames(dt) %in% id_keep, colnames(dt) %in% c("x", as.character(f.red))]
       
-    # Response / group
-    y.train <- y[names(y) %in% id_keep]
-    y.test <- y[!(names(y) %in% id_keep)]
+    # # Response / group
+    # y.train <- y[names(y) %in% id_keep]
+    # y.test <- y[!(names(y) %in% id_keep)]
       
       
-    # Ridge regression
-    m0 <- cv.glmnet(type.measure="class", x=df.train, y=y.train,
-                    alpha=alpha, family=binomial, nfolds=fold)
-    m1 <- glmnet(x=as.matrix(df.train),
-                 y=y.train,
-                 family="binomial",
-                 alpha=alpha,
-                 lambda=m0$lambda.min)
-    pred <- predict(m1, newx=as.matrix(df.test), type="class") %>%
-      data.frame() %>%
-      rename(pred=s0) %>%
-      mutate(pred=factor(pred, levels=c("Adenoma", "CRC")))
+    # # Ridge regression
+    # m0 <- cv.glmnet(type.measure="class", x=df.train, y=y.train,
+    #                 alpha=alpha, family=binomial, nfolds=fold)
+    # m1 <- glmnet(x=as.matrix(df.train),
+    #              y=y.train,
+    #              family="binomial",
+    #              alpha=alpha,
+    #              lambda=m0$lambda.min)
+    
+    
+    # Logistic regression
+    m0 <- glm(x ~ ., data=df.train, family="binomial")
+    probs <- predict(m0, newdata=df.test[, -1], type="response")
+    pred <- ifelse(probs > 0.5, "CRC", "Adenoma")
+    
+    # pred <- predict(m1, newx=as.matrix(df.test), type="class") %>%
+    #   data.frame() %>%
+    #   rename(pred=s0) %>%
+    #   mutate(pred=factor(pred, levels=c("Adenoma", "CRC")))
       
     # Calculate the confusion matrix
-      conf <- caret::confusionMatrix(pred$pred, as.factor(y.test))
+      conf <- caret::confusionMatrix(as.factor(pred), df.test$x)
       
-      df.eval <- data.frame(BER = get.BER(t(conf$table)),
+      df.eval <- data.frame(BER = conf$byClass[["Balanced Accuracy"]],
                             mce = 1-conf$overall[["Accuracy"]],
                             kappa = conf$overall[["Kappa"]],
                             specificity = conf$byClass[["Specificity"]],
@@ -167,9 +214,9 @@ perf_eval <- function(k, X, y, df.feat, fold=3, group.name, alpha=1) {
                             npv = conf$byClass[["Neg Pred Value"]])
     
     # Store the information about the test set
-      subjectPred.temp <- data.frame(sampleID=rownames(pred),
+      subjectPred.temp <- data.frame(sampleID=names(pred),
                                      pred, 
-                                     obs=y.test
+                                     obs=df.test$x
                                      )
       
       out[[i]] <- list(df.eval, subjectPred.temp)

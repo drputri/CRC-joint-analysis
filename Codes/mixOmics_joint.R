@@ -23,72 +23,14 @@ library(mixOmics)
 #----------------------------------------------------------------------------------------
 # DATASET PREPARATION
 #----------------------------------------------------------------------------------------
-load("uBiome_tf20.Rda")       # top 20 genera of uBiome from univariate analysis
-load("uArray_tf15.Rda")       # top 15 features of uArray from univariate analysis
-load("rna_crcad.Rda")         # expression matrix
-load("oturl_crcad.Rda")       # otu relative abundance matrix
-
-
-
-## Microbiome
-load("Data/Obj_Genus.rda")
-metadata <- data.frame(sample_data(Obj_Genus))
-otu <- data.frame(otu_table(Obj_Genus))
-
-
-
-## Microarray 
-load("Data/esetRna_new.Rda") 
-rna <- exprs(esetRna)
-pdata <- pData(esetRna)
-
-
-# Subject selection
-subj.rna <- unique(pdata$ID[which(pdata$biopt %in% c("6 : Polyp", "7 : Tumor"))])
-subj.mb <- as.numeric(as.character(unique(metadata$Patient_ID[which(metadata$Location_type_colon %in% c("Adenoma", "Carcinoma"))])))
-subject <- as.numeric(intersect(subj.rna, subj.mb))
-
-
-# Subset uArray data
-ftr <- as.character(tf_k15$Var1[which(tf_k15$select == "yes")])
-rna.crcad <- as.data.frame.matrix(rna.crcad)
-rna.crcad <- rna.crcad[, colnames(rna.crcad) %in% ftr]
-
-subject <- as.character(subject)
-rna.crcad <- rna.crcad[rownames(rna.crcad) %in% subject, ]
-rna.crcad <- rna.crcad[order(row.names(rna.crcad)), ]  
-rna.crcad <- as.matrix.data.frame(rna.crcad)
-
-
-# Subset uBiome data
-genus <- as.character(tf_k20$Var1[which(tf_k20$select == "yes")])
-metadata$sampleID <- rownames(metadata)
-var <- c("sampleID", "Patient_ID")
-temp <- metadata[var]
-temp <- temp[which(temp$Patient_ID %in% subject), ]
-
-oturl.crcad <- as.data.frame.matrix(oturl.crcad)
-oturl.crcad$sampleID <- rownames(oturl.crcad)
-oturl.crcad <- merge(oturl.crcad, temp, by = "sampleID")
-rownames(oturl.crcad) <- oturl.crcad$Patient_ID
-oturl.crcad <- subset(oturl.crcad, select = -c(sampleID, Patient_ID))
-oturl.crcad <- oturl.crcad[, colnames(oturl.crcad) %in% genus]
-oturl.crcad <- oturl.crcad[rownames(oturl.crcad) %in% subject, ]
-oturl.crcad <- oturl.crcad[order(row.names(oturl.crcad)), ] 
-oturl.crcad <- as.matrix.data.frame(oturl.crcad)
-
-
-# Outcome -- Y
-var <- c("Patient_ID", "GroupAssignment")
-temp <- metadata[var]
-temp <- unique(temp[which(temp$Patient_ID %in% rownames(oturl.crcad)), ])
-temp <- temp[order(temp$Patient_ID), ]
-group <- factor(temp$GroupAssignment)
+load("Data/rna_crcad.Rda")         # expression matrix
+load("Data/otu_431_clr.Rda")       # otu relative abundance matrix
+load("Data/group_crcad.Rda")
 
 
 # Data for mixOmics
 data <- list(uArray = rna.crcad,
-             uBiome = oturl.crcad)
+             uBiome = otu.clr)
 save(data, file = "Data/mixomics_data.Rda")
 
 
@@ -100,7 +42,7 @@ save(data, file = "Data/mixomics_data.Rda")
 #----------------------------------------------------------------------------------------
 # MIXOMICS
 #----------------------------------------------------------------------------------------
-# Design matrix -- full weighted design matrix
+# Design matrix -- full weighted design matrix [USE THIS]
 design = matrix(0.1, ncol = length(data)+1, nrow = length(data)+1, 
                 dimnames = list(c(names(data), "group"), c(names(data), "group")))
 design[, colnames(design) == "group"] <- 1
@@ -116,42 +58,45 @@ design_null[rownames(design_null) == "group",  ] <- 1
 
 
 
-## FULL DESIGN
-sgccda.res <- block.splsda(X = data, Y = group, ncomp = 10, 
-                           design = design)
+## Full weighted design
+sgccda.res <- block.splsda(X=data, Y=group, ncomp=5, 
+                           design=design)
 set.seed(1)
 t1 = proc.time()
-perf.diablo = perf(sgccda.res, validation = 'Mfold', folds = 3, nrepeat = 1000)
+perf.diablo = perf(sgccda.res, validation = 'Mfold', folds=5, nrepeat=500)
 t2 = proc.time()
-running_time = t2 - t1; running_time   # 38 minutes
+running_time = t2 - t1; running_time   # 19.6 minutes
 
-source("funct_plotperf.R")
+save(perf.diablo, file="Data/performance diablo.Rda")
+
+source("Codes/funct_plotperf.R")
 plot.perf.sgccda.mthd(perf.diablo, sd = TRUE)
 
-ncomp = perf.diablo$choice.ncomp$WeightedVote["Overall.BER", "max.dist"]
+ncomp = perf.diablo$choice.ncomp$WeightedVote["Overall.BER", "mahalanobis.dist"]
 
 
 # Tuning keepX: tuning the number of variables to select in each data
 set.seed(1)
-test.keepX = list(rna = c(5:15),
-                  mbiome = c(5:15))
-tune.TCGA = tune.block.splsda(X = data, Y = group, ncomp = 2, 
-                              test.keepX = test.keepX, design = design,
-                              validation = 'Mfold', folds = 3, nrepeat = 1000,
-                              cpus = 4, dist = "max.dist")
-list.keepX = tune.TCGA$choice.keepX
+test.keepX=list(uArray=seq(10, 100, 10),
+                uBiome=seq(10, 20, 1))
+BPPARAM <- BiocParallel::MulticoreParam(workers = parallel::detectCores()-1)
+tune.data <- tune.block.splsda(X=data, Y=group, ncomp=2, 
+                              test.keepX=test.keepX, design=design,
+                              folds=5, nrepeat=500,
+                              BPPARAM=BPPARAM)
+list.keepX = tune.data$choice.keepX
 
 
 # Final model
-sgccda.res = block.splsda(X = data, Y = group, ncomp = 2, 
-                          keepX = list.keepX, design = design)
-save(sgccda.res, file = "mixomics_finalmodel_full.Rda")
+sgccda.res = block.splsda(X=data, Y=group, ncomp=2, 
+                          keepX=list.keepX, design=design)
+save(sgccda.res, file = "Output/mixomics_finalmodel.Rda")
 
-selectVar(sgccda.res, block = 'uArray', comp = 2)$uArray$name           # 15 genes
-selectVar(sgccda.res, block = 'uBiome', comp = 3)$uBiome$name           # 5 genus
-plotDiablo(sgccda.res, ncomp = 1)
+selectVar(sgccda.res, block='uArray', comp=1)$uArray$name           # 15 genes
+selectVar(sgccda.res, block='uBiome', comp=1)$uBiome$name           # 10 genus
+plotDiablo(sgccda.res, ncomp=1)
 plotIndiv(sgccda.res, ind.names = TRUE, legend = TRUE, 
-          title = 'DIABLO')
+          title='DIABLO')
 
 png("mixomics_full_arrow.png")
 plotArrow(sgccda.res, ind.names = FALSE, legend = TRUE, title = 'DIABLO')
@@ -168,67 +113,6 @@ plotLoadings(sgccda.res, comp = 2, contrib = 'max', method = 'median')
 
 
 
-## NULL DESIGN
-sgccda.res <- block.splsda(X = data, Y = group, ncomp = 10, 
-                           design = design_null)
-set.seed(1)
-t1 = proc.time()
-perf.diablo = perf(sgccda.res, validation = 'Mfold', folds = 3, nrepeat = 1000)
-t2 = proc.time()
-running_time = t2 - t1; running_time   # 36 minutes
-
-source("funct_plotperf.R")
-plot.perf.sgccda.mthd(perf.diablo, sd = TRUE)
-
-ncomp = perf.diablo$choice.ncomp$WeightedVote["Overall.BER", "max.dist"]
-
-
-# Tuning keepX: tuning the number of variables to select in each data
-set.seed(1)
-test.keepX = list(rna = c(5:15),
-                  mbiome = c(5:15))
-tune.TCGA = tune.block.splsda(X = data, Y = group, ncomp = 2, 
-                              test.keepX = test.keepX, design = design_null,
-                              validation = 'Mfold', folds = 3, nrepeat = 1000,
-                              cpus = 4, dist = "max.dist")
-list.keepX = tune.TCGA$choice.keepX
-
-
-# Final model
-sgccda.res = block.splsda(X = data, Y = group, ncomp = 2, 
-                          keepX = list.keepX, design = design_null)
-save(sgccda.res, file = "mixomics_finalmodel_null.Rda")
-
-selectVar(sgccda.res, block = 'uArray', comp = 1)$uArray$name           # 15 genes
-selectVar(sgccda.res, block = 'uBiome', comp = 2)$uBiome$name           # 5 genus
-plotDiablo(sgccda.res, ncomp = 3)
-png("mixomics_full_wo cma_3 comp.png")
-plotIndiv(sgccda.res, ind.names = FALSE, legend = TRUE,
-          style = 'ggplot2', title = 'DIABLO')
-dev.off()
-
-png("mixomics_null_arrow.png")
-plotArrow(sgccda.res, ind.names = FALSE, legend = TRUE, title = 'DIABLO')
-dev.off()
-
-plotVar(sgccda.res, var.names = TRUE, style = 'graphics', legend = TRUE, 
-        pch = c(16, 17), cex = c(1,1), col = c('brown1', 'lightgreen'))
-
-png("mixomics_null_circos.png")
-circosPlot(sgccda.res, cutoff = 0.6, line = TRUE, 
-           color.blocks= c('brown1', 'lightgreen'),
-           color.cor = c("chocolate3","grey20"), 
-           size.variables = .6, size.labels = 1)
-dev.off()
-
-png("mixomics_null_network.png")
-network(sgccda.res, blocks = c(1,2),
-        color.node = c('brown1', 'lightgreen'), cutoff = 0.4)
-dev.off()
-plotLoadings(sgccda.res, comp = 2, contrib = 'max', method = 'median')
-
-
-
 
 
 
@@ -236,25 +120,165 @@ plotLoadings(sgccda.res, comp = 2, contrib = 'max', method = 'median')
 #----------------------------------------------------------------------------------------
 # GET THE GENUS AND GENES NAME
 #----------------------------------------------------------------------------------------
-load("mixomics_finalmodel_full.Rda")
+load("Output/mixomics_finalmodel.Rda")
+
+library(Biobase)
+library(magrittr)
+library(tidyr)
+library(dplyr)
+
+#----- FUNCTIONS TO GET THE LOADING VECTORS -----#
+get.loadings.ndisplay <- function(object,
+                                  comp,
+                                  block,
+                                  name.var,
+                                  name.var.complete,
+                                  ndisplay)
+{
+  ##selectvar
+  selected.var = selectVar(object, comp = comp, block = block) # gives name and values of the blocks in 'block'
+  name.selected.var = selected.var[[1]]$name
+  value.selected.var = selected.var[[1]]$value
+  
+  # ndisplay
+  # ------
+  # if null set by default to all variables from selectVar
+  if (is.null(ndisplay))
+  {
+    ndisplay.temp = length(name.selected.var)
+  } else if (ndisplay > length(name.selected.var)) {
+    message("'ndisplay' value is larger than the number of selected variables! It has been reseted to ", length(name.selected.var), " for block ", block)
+    ndisplay.temp = length(name.selected.var)
+  } else {
+    ndisplay.temp = ndisplay
+  }
+  
+  name.selected.var = name.selected.var[1:ndisplay.temp]
+  value.selected.var = value.selected.var[1:ndisplay.temp,]
+  
+  #comp
+  # ----
+  if (is(object, c("mixo_pls","mixo_spls", "rcc")))# cause pls methods just have 1 ncomp, block approaches have different ncomp per block
+  {
+    ncomp = object$ncomp
+    object$X = list(X = object$X, Y = object$Y) # so that the data is in object$X, either it's a pls or block approach
+  } else {
+    ncomp = object$ncomp[block]
+  }
+  
+  if (any(max(comp) > ncomp))
+    stop(paste("Argument 'comp' should be less or equal to ", ncomp))
+  
+  names.block = as.character(names(selected.var)[1]) #it should be one block and ncomp, so we take the first one
+  
+  X = object$X[names.block][[1]]
+  
+  #name.var
+  ind.match = match(name.selected.var, colnames(X)) # look at the position of the selected variables in the original data X
+  if(!is.null(name.var))
+  {
+    if(length(name.var)!= ncol(X))
+      stop("For block '", names.block,"', 'name.var' should be a vector of length ", ncol(X))
+    
+    colnames.X = as.character(name.var[ind.match]) # get the
+  }else{
+    colnames.X = as.character(colnames(X))[ind.match]
+  }
+  X = X[, name.selected.var, drop = FALSE] #reduce the problem to ndisplay
+  
+  #completing colnames.X by the original names of the variables when missing
+  if (name.var.complete == TRUE)
+  {
+    ind = which(colnames.X == "")
+    if (length(ind) > 0)
+      colnames.X[ind] = colnames(X)[ind]
+  }
+  
+  
+  return(list(X = X, names.block = names.block, colnames.X = colnames.X, name.selected.var = name.selected.var, value.selected.var = value.selected.var))
+}
+
+#-----------------------------------------------------#
 
 
-# Features
-f.comp1 <- selectVar(sgccda.res, block = 'uArray', comp = 1)$uArray$name  
-f.comp2 <- selectVar(sgccda.res, block = 'uArray', comp = 2)$uArray$name 
 
-f.comp1 <- substring(f.comp1, 2)
-f.comp2 <- substring(f.comp2, 2)
+
+
+## Microarray features
+res = get.loadings.ndisplay(object=sgccda.res, comp=1, block='uArray', 
+                            name.var=NULL, name.var.complete=FALSE, ndisplay=NULL)
+load1.uArray <- data.frame(var=res$name.selected.var, 
+                           load.value=res$value.selected.var) %>%
+  mutate(abs.load.val=abs(load.value))
+
+
+# Get microarray features from LASSO
+feat <- get(load("Data/uArray_selected feat.Rda"))
+get.feat <- feat[1:6, ]
+
+load1.uArray <- merge(load1.uArray, feat, by.x="var", by.y="Feat", all.x=TRUE)
+load1.uArray$prop <- load1.uArray$Freq/1000
+load1.uArray$Ind <- ifelse(load1.uArray$prop > 0.4, 1, 0)
+
+
+# Get the genes name
+load("Data/esetRna_new.Rda") 
 
 fdata <- as(featureData(esetRna), "data.frame")
-fdata$SYMBOL[which(rownames(fdata) %in% f.comp1)]
-fdata$SYMBOL[which(rownames(fdata) %in% f.comp2)]
+temp <- subset(fdata, select = c(SYMBOL))
+
+load1.uArray <- merge(load1.uArray, temp, by.x="var", by.y="row.names", all.x=TRUE) %>%
+  rename(name="SYMBOL.y") %>%
+  select(-c(SYMBOL.x)) %>%
+  arrange(desc(abs.load.val))
 
 
-# Genera
-g.comp1 <- selectVar(sgccda.res, block = 'uBiome', comp = 1)$uBiome$name  
-g.comp2 <- selectVar(sgccda.res, block = 'uBiome', comp = 2)$uBiome$name  
+# Plot
+ggplot(load1.uArray[1:40, ], aes(x=abs.load.val, y=prop, colour=droplevels(as.factor(Ind)), label=name))+
+  geom_text(hjust=0, vjust=0) +
+  scale_color_manual(na.translate=FALSE,
+                     values=c("black", "red")) +
+  labs(color="Proportion > 0.4",
+       x="Abs loading weight",
+       y="Proportion of selection") +
+  lims(x=c(0.05, 0.3)) +
+  theme_bw()
 
-taxtable <- as.data.frame(tax_table(Obj_Genus))
-taxtable$Genus[which(rownames(taxtable) %in% g.comp1)]
-taxtable$Family[which(rownames(taxtable) == "SVs775")]
+
+
+## Genera
+res = get.loadings.ndisplay(object=sgccda.res, comp=1, block='uBiome', 
+                            name.var=NULL, name.var.complete=FALSE, ndisplay=NULL)
+load1.uBiome <- data.frame(var=res$name.selected.var, 
+                           load.value=res$value.selected.var) %>%
+  mutate(abs.load.val=abs(load.value))
+
+
+res = get.loadings.ndisplay(object=sgccda.res, comp=2, block='uBiome', 
+                            name.var=NULL, name.var.complete=FALSE, ndisplay=NULL)
+load2.uBiome <- data.frame(var=res$name.selected.var, 
+                           load.value=res$value.selected.var) %>%
+  mutate(abs.load.val=abs(load.value))
+
+load.uBiome <- rbind(load1.uBiome, load2.uBiome)
+
+# Get microarray features from LASSO
+feat <- get(load("Data/uBiome_selected feat.Rda"))
+
+load.uBiome <- merge(load.uBiome, feat, by.x="var", by.y="Feat", all.x=TRUE)
+load.uBiome$prop <- load.uBiome$Freq/1000
+load.uBiome$Ind <- ifelse(load.uBiome$prop > 0.4, 1, 0) 
+load.uBiome <- load.uBiome[order(-load.uBiome$abs.load.val), ]
+
+
+
+# Plot
+ggplot(load.uBiome, aes(x=abs.load.val, y=reorder(Genus, abs.load.val))) +
+  geom_point(stat="identity", aes(col=as.factor(Ind), size=prop)) +
+  scale_color_manual(na.translate=FALSE,
+                     values=c("black", "red")) +
+  labs(color="Lasso",
+       size="Prop. of selection",
+       x="Abs loading weight",
+       y="Genera") +
+  theme_bw()
